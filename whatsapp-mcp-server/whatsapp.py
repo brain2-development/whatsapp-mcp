@@ -129,7 +129,7 @@ def list_messages(
     query: Optional[str] = None,
     limit: int = 20,
     page: int = 0,
-    include_context: bool = True,
+    include_context: bool = False,
     context_before: int = 1,
     context_after: int = 1
 ) -> List[Message]:
@@ -282,7 +282,10 @@ def get_message_context(
                 id=msg[6],
                 media_type=msg[7]
             ))
-        
+
+        # Reverse to get chronological order (oldest to newest)
+        before_messages.reverse()
+
         # Get messages after
         cursor.execute("""
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
