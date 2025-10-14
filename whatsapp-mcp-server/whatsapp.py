@@ -129,7 +129,7 @@ def list_messages(
     query: Optional[str] = None,
     limit: int = 20,
     page: int = 0,
-    include_context: bool = True,
+    include_context: bool = False,
     context_before: int = 1,
     context_after: int = 1
 ) -> List[Message]:
@@ -164,8 +164,12 @@ def list_messages(
             params.append(before)
 
         if sender_phone_number:
-            where_clauses.append("messages.sender = ?")
-            params.append(sender_phone_number)
+            # Search for messages in the conversation with this contact
+            # This includes both messages FROM them and TO them (in their direct chat)
+            # Direct chat JID format: phonenumber@s.whatsapp.net
+            direct_chat_jid = f"{sender_phone_number}@s.whatsapp.net"
+            where_clauses.append("(messages.sender = ? OR messages.chat_jid = ?)")
+            params.extend([sender_phone_number, direct_chat_jid])
             
         if chat_jid:
             where_clauses.append("messages.chat_jid = ?")
@@ -278,7 +282,10 @@ def get_message_context(
                 id=msg[6],
                 media_type=msg[7]
             ))
-        
+
+        # Reverse to get chronological order (oldest to newest)
+        before_messages.reverse()
+
         # Get messages after
         cursor.execute("""
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type

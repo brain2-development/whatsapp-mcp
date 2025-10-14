@@ -37,7 +37,7 @@ def list_messages(
     query: Optional[str] = None,
     limit: int = 20,
     page: int = 0,
-    include_context: bool = True,
+    include_context: bool = False,
     context_before: int = 1,
     context_after: int = 1
 ) -> List[Dict[str, Any]]:
@@ -51,7 +51,7 @@ def list_messages(
         query: Optional search term to filter messages by content
         limit: Maximum number of messages to return (default 20)
         page: Page number for pagination (default 0)
-        include_context: Whether to include messages before and after matches (default True)
+        include_context: Whether to include messages before and after matches (default False)
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
     """
