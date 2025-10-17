@@ -12,7 +12,8 @@ from whatsapp import (
     send_message as whatsapp_send_message,
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
-    download_media as whatsapp_download_media
+    download_media as whatsapp_download_media,
+    set_chat_presence as whatsapp_set_chat_presence
 )
 
 # Initialize FastMCP server
@@ -245,6 +246,23 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
             "success": False,
             "message": "Failed to download media"
         }
+
+@mcp.tool()
+def set_chat_presence(chat_jid: str, state: str) -> Dict[str, Any]:
+    """Set your presence in a chat to 'typing' or 'recording'.
+    
+    Args:
+        chat_jid: The JID of the chat to set presence in
+        state: The presence state to set, either "typing" or "recording"
+    
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, status_message = whatsapp_set_chat_presence(chat_jid, state)
+    return {
+        "success": success,
+        "message": status_message
+    }
 
 if __name__ == "__main__":
     # Initialize and run the server

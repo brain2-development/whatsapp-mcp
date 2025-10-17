@@ -773,3 +773,43 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
         return None
+
+def set_chat_presence(chat_jid: str, state: str) -> Tuple[bool, str]:
+    """Set chat presence (typing or recording).
+    
+    Args:
+        chat_jid: The JID of the chat
+        state: The presence state ("typing" or "recording")
+    
+    Returns:
+        A tuple containing success status and a status message
+    """
+    try:
+        # Validate input
+        if not chat_jid:
+            return False, "Chat JID must be provided"
+        
+        if state not in ["typing", "recording"]:
+            return False, "State must be 'typing' or 'recording'"
+        
+        url = f"{WHATSAPP_API_BASE_URL}/presence"
+        payload = {
+            "chat_jid": chat_jid,
+            "state": state,
+        }
+        
+        response = requests.post(url, json=payload)
+        
+        # Check if the request was successful
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        else:
+            return False, f"Error: HTTP {response.status_code} - {response.text}"
+            
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
