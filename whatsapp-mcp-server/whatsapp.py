@@ -8,6 +8,7 @@ import json
 import audio
 
 MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
+WHATSAPP_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'whatsapp.db')
 WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
 
 @dataclass
@@ -400,21 +401,21 @@ def list_chats(
 def search_contacts(query: str) -> List[Contact]:
     """Search contacts by name or phone number."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = sqlite3.connect(WHATSAPP_DB_PATH)
         cursor = conn.cursor()
-        
+
         # Split query into characters to support partial matching
         search_pattern = '%' +query + '%'
-        
+
         cursor.execute("""
-            SELECT DISTINCT 
-                jid,
-                name
-            FROM chats
-            WHERE 
-                (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
-                AND jid NOT LIKE '%@g.us'
-            ORDER BY name, jid
+            SELECT DISTINCT
+                their_jid,
+                full_name
+            FROM whatsmeow_contacts
+            WHERE
+                (LOWER(full_name) LIKE LOWER(?) OR LOWER(their_jid) LIKE LOWER(?))
+                AND their_jid NOT LIKE '%@g.us'
+            ORDER BY full_name, their_jid
             LIMIT 50
         """, (search_pattern, search_pattern))
         
@@ -772,3 +773,43 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
         return None
+
+def set_chat_presence(chat_jid: str, state: str) -> Tuple[bool, str]:
+    """Set chat presence (typing or recording).
+    
+    Args:
+        chat_jid: The JID of the chat
+        state: The presence state ("typing" or "recording")
+    
+    Returns:
+        A tuple containing success status and a status message
+    """
+    try:
+        # Validate input
+        if not chat_jid:
+            return False, "Chat JID must be provided"
+        
+        if state not in ["typing", "recording"]:
+            return False, "State must be 'typing' or 'recording'"
+        
+        url = f"{WHATSAPP_API_BASE_URL}/presence"
+        payload = {
+            "chat_jid": chat_jid,
+            "state": state,
+        }
+        
+        response = requests.post(url, json=payload)
+        
+        # Check if the request was successful
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        else:
+            return False, f"Error: HTTP {response.status_code} - {response.text}"
+            
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"

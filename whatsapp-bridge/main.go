@@ -484,6 +484,53 @@ type DownloadMediaResponse struct {
 	Path     string `json:"path,omitempty"`
 }
 
+// SetPresenceRequest represents the request body for setting chat presence
+type SetPresenceRequest struct {
+	ChatJID string `json:"chat_jid"`
+	State   string `json:"state"` // "typing" or "recording"
+}
+
+// SetPresenceResponse represents the response for setting chat presence
+type SetPresenceResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+// Function to set chat presence (typing, recording)
+func setChatPresence(client *whatsmeow.Client, chatJID string, state string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp"
+	}
+
+	// Parse JID
+	jid, err := types.ParseJID(chatJID)
+	if err != nil {
+		return false, fmt.Sprintf("Error parsing JID: %v", err)
+	}
+
+	// Determine presence state
+	var presence types.ChatPresence
+	var media types.ChatPresenceMedia
+	switch state {
+	case "typing":
+		presence = types.ChatPresenceComposing
+		media = types.ChatPresenceMediaText
+	case "recording":
+		presence = types.ChatPresenceComposing
+		media = types.ChatPresenceMediaAudio
+	default:
+		return false, fmt.Sprintf("Invalid presence state: %s", state)
+	}
+
+	// Send presence state
+	err = client.SendChatPresence(jid, presence, media)
+	if err != nil {
+		return false, fmt.Sprintf("Error sending presence: %v", err)
+	}
+
+	return true, fmt.Sprintf("Presence set to '%s' for chat %s", state, chatJID)
+}
+
 // Store additional media info in the database
 func (store *MessageStore) StoreMediaInfo(id, chatJID, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
 	_, err := store.db.Exec(
@@ -771,6 +818,49 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			Message:  fmt.Sprintf("Successfully downloaded %s media", mediaType),
 			Filename: filename,
 			Path:     path,
+		})
+	})
+
+	// Handler for setting chat presence
+	http.HandleFunc("/api/presence", func(w http.ResponseWriter, r *http.Request) {
+		// Only allow POST requests
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse the request body
+		var req SetPresenceRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		// Validate request
+		if req.ChatJID == "" || req.State == "" {
+			http.Error(w, "Chat JID and state are required", http.StatusBadRequest)
+			return
+		}
+
+		fmt.Printf("Received presence request: Chat JID=%s, State=%s\n", req.ChatJID, req.State)
+
+		// Set presence
+		success, message := setChatPresence(client, req.ChatJID, req.State)
+
+		fmt.Printf("Presence update result: Success=%t, Message=%s\n", success, message)
+
+		// Set response headers
+		w.Header().Set("Content-Type", "application/json")
+
+		// Set appropriate status code
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+
+		// Send response
+		json.NewEncoder(w).Encode(SetPresenceResponse{
+			Success: success,
+			Message: message,
 		})
 	})
 
