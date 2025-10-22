@@ -1,8 +1,10 @@
 import sqlite3
-from datetime import datetime
+from collections import OrderedDict
+from datetime import datetime, timedelta
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 import os.path
+import re
 import requests
 import json
 import audio
@@ -47,6 +49,124 @@ class MessageContext:
     message: Message
     before: List[Message]
     after: List[Message]
+
+
+def _parse_natural_date_expression(expression: str, *, now: Optional[datetime] = None) -> Optional[datetime]:
+    """Convert supported natural language expressions into a datetime."""
+
+    if not expression:
+        return None
+
+    reference = now or datetime.utcnow()
+    text = expression.strip()
+    if not text:
+        return None
+
+    lowered = text.lower()
+
+    if lowered in {"last week", "past week"}:
+        return reference - timedelta(days=7)
+    if lowered in {"last month", "past month"}:
+        return reference - timedelta(days=30)
+    if lowered in {"last year", "past year"}:
+        return reference - timedelta(days=365)
+
+    relative_match = re.match(r"^(?P<quantity>\d+)\s+(?P<unit>day|week|month|year)s?\s+ago$", lowered)
+    if relative_match:
+        quantity = int(relative_match.group("quantity"))
+        unit = relative_match.group("unit")
+        if unit == "day":
+            delta = timedelta(days=quantity)
+        elif unit == "week":
+            delta = timedelta(weeks=quantity)
+        elif unit == "month":
+            delta = timedelta(days=30 * quantity)
+        else:
+            delta = timedelta(days=365 * quantity)
+        return reference - delta
+
+    if re.fullmatch(r"\d{4}", lowered):
+        return datetime(int(lowered), 1, 1)
+
+    for fmt in ("%B %Y", "%b %Y"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(
+            f"Unable to parse 'since' value '{expression}'. Use ISO-8601 or supported natural language expressions."
+        ) from exc
+
+
+def _resolve_time_filter(
+    *,
+    max_age_days: Optional[int] = None,
+    since: Optional[str] = None,
+    preset: Optional[str] = None,
+    now: Optional[datetime] = None
+) -> Tuple[Optional[datetime], Dict[str, Any]]:
+    """Determine earliest timestamp threshold and capture applied filters."""
+
+    reference = now or datetime.utcnow()
+    applied: Dict[str, Any] = {
+        "preset": None,
+        "max_age_days": None,
+        "since": None
+    }
+
+    threshold: Optional[datetime] = None
+
+    if preset:
+        preset_key = preset.strip().lower()
+        applied["preset"] = preset_key
+
+        if preset_key == "recent":
+            threshold = reference - timedelta(days=30)
+        elif preset_key == "this_year":
+            threshold = datetime(reference.year, 1, 1)
+        elif preset_key == "all":
+            threshold = None
+        else:
+            raise ValueError(f"Unknown preset '{preset}'. Supported presets are 'recent', 'this_year', and 'all'.")
+
+        if threshold is not None:
+            applied["since"] = threshold.isoformat()
+            applied["max_age_days"] = max(0, (reference - threshold).days)
+        return threshold, applied
+
+    if since:
+        threshold = _parse_natural_date_expression(since, now=reference)
+        if threshold is not None:
+            applied["since"] = threshold.isoformat()
+            applied["max_age_days"] = max(0, (reference - threshold).days)
+        return threshold, applied
+
+    if max_age_days is not None:
+        if max_age_days < 0:
+            raise ValueError("max_age_days must be zero or a positive integer")
+        threshold = reference - timedelta(days=max_age_days)
+        applied["max_age_days"] = max_age_days
+        applied["since"] = threshold.isoformat()
+
+    return threshold, applied
+
+
+def _serialize_message_row(row: sqlite3.Row) -> Dict[str, Any]:
+    timestamp = datetime.fromisoformat(row["timestamp"])
+    return {
+        "id": row["id"],
+        "chat_jid": row["chat_jid"],
+        "chat_name": row["chat_name"],
+        "timestamp": timestamp.isoformat(),
+        "sender": row["sender"],
+        "content": row["content"],
+        "is_from_me": bool(row["is_from_me"]),
+        "media_type": row["media_type"],
+    }
 
 def get_sender_name(sender_jid: str) -> str:
     try:
@@ -319,6 +439,158 @@ def get_message_context(
     except sqlite3.Error as e:
         print(f"Database error: {e}")
         raise
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+def get_chat_history(
+    *,
+    chat_jid: Optional[str] = None,
+    max_age_days: Optional[int] = None,
+    limit: int = 1000,
+    page: int = 0,
+    since: Optional[str] = None,
+    preset: Optional[str] = None
+) -> Dict[str, Any]:
+    """Retrieve chat history grouped by chat with bulk-friendly defaults."""
+
+    if limit <= 0:
+        raise ValueError("limit must be a positive integer")
+    if page < 0:
+        raise ValueError("page must be zero or a positive integer")
+
+    threshold, applied_filters = _resolve_time_filter(
+        max_age_days=max_age_days,
+        since=since,
+        preset=preset
+    )
+
+    offset = page * limit
+
+    try:
+        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        base_from = """
+            FROM messages
+            JOIN chats ON messages.chat_jid = chats.jid
+        """
+
+        where_clauses = []
+        params: List[Any] = []
+
+        if chat_jid:
+            where_clauses.append("messages.chat_jid = ?")
+            params.append(chat_jid)
+
+        if threshold is not None:
+            where_clauses.append("messages.timestamp >= ?")
+            params.append(threshold.isoformat())
+
+        where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        count_query = "SELECT COUNT(*) " + base_from + where_sql
+        cursor.execute(count_query, tuple(params))
+        total_messages = cursor.fetchone()[0]
+
+        warning: Optional[str] = None
+        if total_messages > 5000:
+            warning = f"Reading {total_messages} messages may take a while"
+
+        data_query = (
+            "SELECT messages.id, messages.timestamp, messages.sender, messages.content, "
+            "messages.is_from_me, messages.media_type, chats.jid AS chat_jid, chats.name AS chat_name "
+            + base_from
+            + where_sql
+            + " ORDER BY messages.timestamp DESC LIMIT ? OFFSET ?"
+        )
+
+        params_with_pagination = list(params)
+        params_with_pagination.extend([limit, offset])
+
+        cursor.execute(data_query, tuple(params_with_pagination))
+        rows = cursor.fetchall()
+
+        groups: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        earliest_timestamp: Optional[datetime] = None
+        latest_timestamp: Optional[datetime] = None
+
+        for row in rows:
+            message = _serialize_message_row(row)
+            message_timestamp = datetime.fromisoformat(message["timestamp"])
+
+            if latest_timestamp is None or message_timestamp > latest_timestamp:
+                latest_timestamp = message_timestamp
+            if earliest_timestamp is None or message_timestamp < earliest_timestamp:
+                earliest_timestamp = message_timestamp
+
+            chat_key = row["chat_name"] or row["chat_jid"]
+            group = groups.get(chat_key)
+            if group is None:
+                group = {
+                    "chat_name": row["chat_name"] or row["chat_jid"],
+                    "chat_jid": row["chat_jid"],
+                    "is_group": str(row["chat_jid"]).endswith("@g.us"),
+                    "message_count": 0,
+                    "messages": [],
+                    "first_message": None,
+                    "last_message": None,
+                    "_first_ts": None,
+                    "_last_ts": None,
+                }
+                groups[chat_key] = group
+
+            group["messages"].append(message)
+            group["message_count"] += 1
+
+            group_first_ts = group["_first_ts"]
+            group_last_ts = group["_last_ts"]
+
+            if group_first_ts is None or message_timestamp < group_first_ts:
+                group["_first_ts"] = message_timestamp
+                group["first_message"] = message
+
+            if group_last_ts is None or message_timestamp > group_last_ts:
+                group["_last_ts"] = message_timestamp
+                group["last_message"] = message
+
+        for group in groups.values():
+            group.pop("_first_ts", None)
+            group.pop("_last_ts", None)
+
+        returned_messages = sum(group["message_count"] for group in groups.values())
+
+        summary: Dict[str, Any] = {
+            "total_messages": total_messages,
+            "returned_messages": returned_messages,
+            "total_chats": len(groups),
+            "limit": limit,
+            "page": page,
+            "has_more": total_messages > (offset + returned_messages),
+            "applied_filters": applied_filters,
+        }
+
+        if earliest_timestamp or latest_timestamp:
+            summary["date_range"] = {
+                "start": earliest_timestamp.isoformat() if earliest_timestamp else None,
+                "end": latest_timestamp.isoformat() if latest_timestamp else None,
+            }
+
+        response: Dict[str, Any] = {
+            "success": True,
+            "summary": summary,
+            "groups": {key: value for key, value in groups.items()}
+        }
+
+        if warning:
+            response["warning"] = warning
+
+        return response
+
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"Database error while fetching chat history: {exc}") from exc
     finally:
         if 'conn' in locals():
             conn.close()

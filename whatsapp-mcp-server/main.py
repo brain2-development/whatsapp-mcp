@@ -3,6 +3,7 @@ from mcp.server.fastmcp import FastMCP
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
+    get_chat_history as whatsapp_get_chat_history,
     list_chats as whatsapp_list_chats,
     get_chat as whatsapp_get_chat,
     get_direct_chat_by_contact as whatsapp_get_direct_chat_by_contact,
@@ -69,6 +70,59 @@ def list_messages(
         context_after=context_after
     )
     return messages
+
+
+@mcp.tool()
+def get_chat_history(
+    chat_jid: Optional[str] = None,
+    max_age_days: Optional[int] = None,
+    limit: int = 1000,
+    page: int = 0,
+    since: Optional[str] = None,
+    preset: Optional[str] = None
+) -> Dict[str, Any]:
+    """Fetch bulk WhatsApp history grouped by chat with rich metadata.
+
+    Args:
+        chat_jid: Optional JID to restrict results to a single chat.
+        max_age_days: Optional limit on how far back to fetch messages based on age.
+        limit: Maximum number of messages per page (default 1000).
+        page: Zero-indexed page number for pagination across the message set.
+        since: Natural language or ISO-8601 expression indicating earliest messages to include.
+        preset: Convenience preset overriding date filters. Supported values: "recent", "this_year", "all".
+
+    Returns:
+        Dictionary containing summary metadata, grouped messages keyed by chat name, and optional warning for very large result sets.
+
+    Examples:
+        - get_chat_history(limit=1000, preset="recent")
+        - get_chat_history(chat_jid="12345@g.us", since="January 2024")
+    """
+
+    try:
+        return whatsapp_get_chat_history(
+            chat_jid=chat_jid,
+            max_age_days=max_age_days,
+            limit=limit,
+            page=page,
+            since=since,
+            preset=preset
+        )
+    except ValueError as exc:
+        return {
+            "success": False,
+            "error": str(exc)
+        }
+    except RuntimeError as exc:
+        return {
+            "success": False,
+            "error": str(exc)
+        }
+    except Exception as exc:  # Defensive catch to ensure meaningful response
+        return {
+            "success": False,
+            "error": f"Unexpected error while fetching chat history: {exc}"
+        }
 
 @mcp.tool()
 def list_chats(
